@@ -1,0 +1,466 @@
+<roblox version="4">
+  <Item class="Folder" referent="0">
+    <Properties>
+      <string name="Name">Parentinator-Plugin</string>
+    </Properties>
+    <Item class="Script" referent="1">
+      <Properties>
+        <string name="Name">Parentinator</string>
+        <token name="RunContext">0</token>
+        <string name="Source">local ChangeHistoryService = game:GetService("ChangeHistoryService")
+local Selection = game:GetService("Selection")
+local StarterPlayer = game:GetService("StarterPlayer")
+local StudioService = game:GetService("StudioService")
+local ToastNotifications = require(script.Parent.ToastNotifications)
+local PICK_PARENT_ICON = "rbxassetid://17176191402"
+local MOVE_TO_SERVICE_ICON = "rbxassetid://17184424315"
+local MOVE_TO_PARENT_ICON = "rbxassetid://17184421347"
+local COPY_TO_PARENT_ICON = "rbxassetid://17184422140"
+local COPY_TO_SERVICE_ICON = "rbxassetid://17184423270"
+local THONK_ICON = "rbxassetid://17183855759"
+local CANCEL_ICON = "rbxassetid://17194156539"
+
+local toolbar = plugin:CreateToolbar("Parentinator")
+local recording: string? = nil
+
+local function MoveObjectsToParent(objects: { Instance }, parent: Instance, clone: boolean)
+	local toBeMoved = {}
+	if #objects > 0 then
+		for _, o in ipairs(objects) do
+			local auxp = o.Parent
+			local shouldMove = true
+			while auxp do
+				if table.find(objects, auxp) then
+					shouldMove = false
+					break
+				end
+				auxp = auxp.Parent
+			end
+			if shouldMove then
+				table.insert(toBeMoved, o)
+			end
+		end
+	end
+
+	if recording then
+		warn("found previous recording, rolling back")
+		ChangeHistoryService:FinishRecording(recording, Enum.FinishRecordingOperation.Cancel)
+	end
+	recording = ChangeHistoryService:TryBeginRecording("Parentinator", "Parentinator: Changing parents")
+	if not recording then
+		warn("Failed to create the undo recording?")
+		return
+	end
+	local success, err = pcall(function()
+		for _, m in toBeMoved do
+			if clone then
+				m:Clone().Parent = parent
+			else
+				m.Parent = parent
+			end
+		end
+	end)
+
+	if not success then
+		warn("Parentinator Error: ", err)
+		ChangeHistoryService:FinishRecording(recording, Enum.FinishRecordingOperation.Cancel)
+		ToastNotifications.CreateToast("ErrorToast", "Something went wrong", err, THONK_ICON, 7)
+	else
+		ChangeHistoryService:FinishRecording(recording, Enum.FinishRecordingOperation.Commit)
+	end
+	recording = nil
+end
+
+local MoveToServiceButton =
+	toolbar:CreateButton("Move selection to Service", "Move the selected instances to a service", MOVE_TO_SERVICE_ICON)
+local CopyToServiceButton =
+	toolbar:CreateButton("Copy selection to Service", "Copy the selected instances to a service", COPY_TO_SERVICE_ICON)
+local MoveToParentButton =
+	toolbar:CreateButton("Move selection to Parent", "Move the selected instances to a parent", MOVE_TO_PARENT_ICON)
+local CopyToParentButton =
+	toolbar:CreateButton("Copy selection to Parent", "Copy the selected instances to a parent", COPY_TO_PARENT_ICON)
+
+MoveToServiceButton.ClickableWhenViewportHidden = true
+CopyToServiceButton.ClickableWhenViewportHidden = true
+MoveToParentButton.ClickableWhenViewportHidden = true
+CopyToParentButton.ClickableWhenViewportHidden = true
+
+local CancelButton: PluginToolbarButton
+
+local Services = {
+	"Workspace",
+	"Lighting",
+	"MaterialService",
+	"ReplicatedFirst",
+	"ReplicatedStorage",
+	"ServerScriptService",
+	"ServerStorage",
+	"StarterGui",
+	"StarterPack",
+	"StarterPlayer",
+	"StarterPlayer/StarterCharacterScripts",
+	"StarterPlayer/StarterPlayerScripts",
+	"Teams",
+	"SoundService",
+	"TextChatService",
+}
+local ServicesMenu = plugin:CreatePluginMenu("ParentinatorMenu", "Parentinator")
+
+for _, s in ipairs(Services) do
+	local serviceName = string.split(s, "/")[1]
+	ServicesMenu:AddNewAction(s, serviceName, StudioService:GetClassIcon(serviceName).Image)
+end
+
+local pickingParent = false
+local newParentToast: any
+local selectionChangedConnection: RBXScriptConnection?
+function CancelParentPicking()
+	if not pickingParent then
+		return
+	end
+	pickingParent = false
+	if newParentToast then
+		newParentToast.CancelToast()
+		newParentToast = nil
+	end
+	if selectionChangedConnection then
+		selectionChangedConnection:Disconnect()
+		selectionChangedConnection = nil
+	end
+	CancelButton.Enabled = false
+	MoveToParentButton.Enabled = false
+	MoveToParentButton.Enabled = true
+	CopyToParentButton.Enabled = false
+	CopyToParentButton.Enabled = true
+	MoveToParentButton:SetActive(false)
+	CopyToParentButton:SetActive(false)
+	MoveToServiceButton.Enabled = false
+	MoveToServiceButton.Enabled = true
+	CopyToServiceButton.Enabled = false
+	CopyToServiceButton.Enabled = true
+	MoveToServiceButton:SetActive(false)
+	CopyToServiceButton:SetActive(false)
+end
+
+CancelButton = toolbar:CreateButton("Cancel picking parent", "Cancel picking the parent for the instances", CANCEL_ICON)
+CancelButton.ClickableWhenViewportHidden = true
+CancelButton.Enabled = false
+CancelButton.Click:Connect(CancelParentPicking)
+
+function ToServiceCallback(clone: boolean)
+	local selectedInstances = Selection:Get()
+	if #selectedInstances == 0 then
+		ToastNotifications.CreateToast(
+			"ErrorToast",
+			"Select an object first",
+			"and then press the button",
+			THONK_ICON,
+			3
+		)
+		MoveToServiceButton.Enabled = false
+		MoveToServiceButton.Enabled = true
+		CopyToServiceButton.Enabled = false
+		CopyToServiceButton.Enabled = true
+		MoveToServiceButton:SetActive(false)
+		CopyToServiceButton:SetActive(false)
+		return
+	end
+	local selected = ServicesMenu:ShowAsync()
+	if selected then
+		local splitId = selected.ActionId:split("_")
+		local serviceId = splitId[#splitId]
+		local service = string.split(serviceId, "/")[1]
+		local newParent = game:GetService(service)
+		if service == "StarterPlayer" then
+			local subService = string.split(serviceId, "/")[2]
+			if subService ~= nil then
+				newParent = (StarterPlayer :: any)[subService]
+			end
+		end
+		MoveObjectsToParent(Selection:Get(), newParent, clone)
+	end
+	MoveToServiceButton.Enabled = false
+	MoveToServiceButton.Enabled = true
+	CopyToServiceButton.Enabled = false
+	CopyToServiceButton.Enabled = true
+	MoveToServiceButton:SetActive(false)
+	CopyToServiceButton:SetActive(false)
+end
+
+function WaitForNewParentCallback(clone: boolean)
+	local selectedInstances = Selection:Get()
+	if #selectedInstances == 0 then
+		ToastNotifications.CreateToast(
+			"ErrorToast",
+			"Select an object first",
+			"and then press the button",
+			THONK_ICON,
+			3
+		)
+		MoveToParentButton.Enabled = false
+		MoveToParentButton.Enabled = true
+		CopyToParentButton.Enabled = false
+		CopyToParentButton.Enabled = true
+		MoveToParentButton:SetActive(false)
+		CopyToParentButton:SetActive(false)
+		return
+	end
+	newParentToast = ToastNotifications.CreateToast(
+		"ParentTooltip",
+		"Pick new parent",
+		"press esc to cancel",
+		PICK_PARENT_ICON,
+		5000
+	)
+	pickingParent = true
+	selectionChangedConnection = Selection.SelectionChanged:Connect(function()
+		local selected = Selection:Get()
+		if #selected > 0 then
+			CancelParentPicking()
+			MoveObjectsToParent(selectedInstances, selected[1], clone)
+		end
+	end)
+	CancelButton.Enabled = true
+	MoveToParentButton.Enabled = false
+	CopyToParentButton.Enabled = false
+	MoveToServiceButton.Enabled = false
+	CopyToServiceButton.Enabled = false
+end
+
+MoveToServiceButton.Click:Connect(function()
+	ToServiceCallback(false)
+end)
+CopyToServiceButton.Click:Connect(function()
+	ToServiceCallback(true)
+end)
+
+MoveToParentButton.Click:Connect(function()
+	WaitForNewParentCallback(false)
+end)
+CopyToParentButton.Click:Connect(function()
+	WaitForNewParentCallback(true)
+end)
+
+-- local Mouse = plugin:GetMouse()
+-- plugin:Activate(true)
+-- Mouse.Icon = "rbxasset://SystemCursors/Wait"
+
+-- local selectParentToast =
+-- 	ToastNotifications.CreateToast("ParentTooltip", "Pick new parent", "press esc to cancel", PICK_PARENT_ICON, 5000)
+-- selectParentToast.HideToast()</string>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="2">
+      <Properties>
+        <string name="Name">ToastNotifications</string>
+        <string name="Source">-- Original notification from J00SAN (ImJoosan)
+local TweenService = game:GetService("TweenService")
+local DebrisService = game:GetService("Debris")
+local Toast = require(script.Toast)
+local module = {}
+
+function AnimateToast(toast: any, anim)
+	local tweenInfo = TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+	local open = anim == "open"
+
+	local imgParams = { ImageTransparency = open and 0 or 1 }
+	local txtParams = { TextTransparency = open and 0 or 1 }
+	TweenService:Create(toast, tweenInfo, {
+		Size = open and UDim2.new(0, 326, 0, 58) or UDim2.new(0, 80, 0, 58),
+		ImageTransparency = open and 0.4 or 1,
+	}):Play()
+	TweenService:Create(toast.IconBuffer.Icon, tweenInfo, imgParams):Play()
+	TweenService:Create(toast.TextBuffer.Upper, tweenInfo, txtParams):Play()
+	TweenService:Create(toast.TextBuffer.Lower, tweenInfo, txtParams):Play()
+
+	if not open then
+		DebrisService:AddItem(toast, 0.25)
+	end
+end
+
+function GetGui(): ScreenGui
+	-- local Player = game.Players.LocalPlayer
+	local coreGui = game:GetService("CoreGui")
+	local gui = (coreGui:FindFirstChild("Toasts") :: ScreenGui) or Instance.new("ScreenGui")
+	gui.Parent = coreGui
+	gui.DisplayOrder = 2147483647
+	gui.Name = "Toasts"
+
+	return gui
+end
+
+module.CreateToast = function(ToastId, TopText, BottomText, IconId, DisplayTime)
+	-- local newToast = script.Toast:Clone() -- TODO: Move this to code only
+	local newToast: any = Toast()
+	newToast.TextBuffer.Upper.Text = TopText
+	newToast.TextBuffer.Lower.Text = BottomText
+	newToast.IconBuffer.Icon.Image = IconId
+	newToast.Name = ToastId
+
+	local oldToast: ImageLabel = GetGui():FindFirstChild(ToastId) :: ImageLabel
+	local run = false
+
+	if oldToast then
+		run = oldToast.ImageTransparency &lt; 0.4
+	end
+
+	if not run then
+		if DisplayTime > 0 then
+			task.delay(DisplayTime, function()
+				AnimateToast(newToast, "cancel")
+			end)
+		end
+		AnimateToast(newToast, "open")
+		newToast.Parent = GetGui()
+
+		return {
+			CancelToast = function()
+				AnimateToast(newToast, "cancel")
+			end,
+			DestroyToast = function(delaytime: "optional")
+				DebrisService:AddItem(newToast, delaytime or 0)
+			end,
+			HideToast = function()
+				newToast.Visible = false
+			end,
+			ShowToast = function()
+				newToast.Visible = true
+			end,
+		}
+	else
+		return { CancelToast = empty(), DestroyToast = empty(), HideToast = empty(), ShowToast = empty() }
+	end
+end
+
+function empty()
+	return function() end
+end
+
+module.GetToast = function(id)
+	local gui = GetGui()
+	local toast = gui:FindFirstChild(id) :: ImageLabel
+
+	if toast then
+		return {
+			CancelToast = function()
+				AnimateToast(toast, "cancel")
+			end,
+			DestroyToast = function(delaytime: "optional")
+				DebrisService:AddItem(toast, delaytime or 0)
+			end,
+			HideToast = function()
+				toast.Visible = false
+			end,
+			ShowToast = function()
+				toast.Visible = true
+			end,
+		}
+	else
+		return { CancelToast = empty(), DestroyToast = empty(), HideToast = empty(), ShowToast = empty() }
+	end
+end
+
+module.CancelAllToasts = function()
+	for i, toast in pairs(GetGui():GetChildren()) do
+		AnimateToast(toast, "cancel")
+	end
+end
+
+return module</string>
+      </Properties>
+      <Item class="ModuleScript" referent="3">
+        <Properties>
+          <string name="Name">Toast</string>
+          <string name="Source">local function ToastComponent()
+	-- Toast
+	local Toast = Instance.new("ImageLabel")
+	Toast["ZIndex"] = 2
+	Toast["BorderSizePixel"] = 0
+	Toast["SliceCenter"] = Rect.new(3, 3, 3, 3)
+	Toast["ScaleType"] = Enum.ScaleType.Slice
+	Toast["ImageTransparency"] = 1
+	Toast["ImageColor3"] = Color3.fromRGB(33, 33, 33)
+	Toast["AnchorPoint"] = Vector2.new(0.5, 0)
+	Toast["Image"] = "rbxasset://textures/ui/Camera/CameraToast9Slice.png"
+	Toast["ImageRectSize"] = Vector2.new(6, 6)
+	Toast["Size"] = UDim2.new(0, 80, 0, 58)
+	Toast["ClipsDescendants"] = true
+	Toast["BackgroundTransparency"] = 1
+	Toast["Name"] = "Toast"
+	Toast["Position"] = UDim2.new(0.5, 0, 0, 8)
+
+	-- Toast.IconBuffer
+	local IconBuffer = Instance.new("Frame")
+	IconBuffer.Parent = Toast
+	IconBuffer["ZIndex"] = 2
+	IconBuffer["BorderSizePixel"] = 0
+	IconBuffer["Size"] = UDim2.new(0, 80, 1, 0)
+	IconBuffer["Name"] = "IconBuffer"
+	IconBuffer["BackgroundTransparency"] = 1
+
+	-- Toast.IconBuffer.Icon
+	local Icon = Instance.new("ImageLabel")
+	Icon.Parent = IconBuffer
+	Icon["ZIndex"] = 3
+	Icon["ImageTransparency"] = 1
+	Icon["ImageColor3"] = Color3.fromRGB(201, 201, 201)
+	Icon["AnchorPoint"] = Vector2.new(0.5, 0.5)
+	Icon["Image"] = "rbxasset://textures/ui/Camera/CameraToastIcon.png"
+	Icon["Size"] = UDim2.new(0, 48, 0, 48)
+	Icon["BackgroundTransparency"] = 1
+	Icon["Name"] = "Icon"
+	Icon["Position"] = UDim2.new(0.5, 0, 0.5, 0)
+
+	-- Toast.TextBuffer
+	local TextBuffer = Instance.new("Frame")
+	TextBuffer.Parent = Toast
+	TextBuffer["ZIndex"] = 2
+	TextBuffer["BorderSizePixel"] = 0
+	TextBuffer["ClipsDescendants"] = true
+	TextBuffer["Size"] = UDim2.new(1, -80, 1, 0)
+	TextBuffer["Position"] = UDim2.new(0, 80, 0, 0)
+	TextBuffer["Name"] = "TextBuffer"
+	TextBuffer["BackgroundTransparency"] = 1
+
+	-- Toast.TextBuffer.Upper
+	local Upper = Instance.new("TextLabel")
+	Upper.Parent = TextBuffer
+	Upper["ZIndex"] = 3
+	Upper["TextXAlignment"] = Enum.TextXAlignment.Left
+	Upper["TextTransparency"] = 1
+	Upper["TextSize"] = 19
+	Upper["FontFace"] =
+		Font.new("rbxasset://fonts/families/GothamSSm.json", Enum.FontWeight.Medium, Enum.FontStyle.Normal)
+	Upper["TextColor3"] = Color3.fromRGB(201, 201, 201)
+	Upper["BackgroundTransparency"] = 1
+	Upper["AnchorPoint"] = Vector2.new(0, 1)
+	Upper["Size"] = UDim2.new(1, 0, 0, 19)
+	Upper["Text"] = "Upper text"
+	Upper["Name"] = "Upper"
+	Upper["Position"] = UDim2.new(0, 0, 0.5, 0)
+
+	-- Toast.TextBuffer.Lower
+	local Lower = Instance.new("TextLabel")
+	Lower.Parent = TextBuffer
+	Lower["TextTruncate"] = Enum.TextTruncate.SplitWord
+	Lower["ZIndex"] = 3
+	Lower["TextXAlignment"] = Enum.TextXAlignment.Left
+	Lower["TextTransparency"] = 1
+	Lower["TextSize"] = 15
+	Lower["FontFace"] =
+		Font.new("rbxasset://fonts/families/GothamSSm.json", Enum.FontWeight.Regular, Enum.FontStyle.Normal)
+	Lower["TextColor3"] = Color3.fromRGB(201, 201, 201)
+	Lower["BackgroundTransparency"] = 1
+	Lower["Size"] = UDim2.new(1, 0, 0, 15)
+	Lower["Text"] = "Lower text"
+	Lower["Name"] = "Lower"
+	Lower["Position"] = UDim2.new(0, 0, 0.5, 3)
+
+	return Toast
+end
+return ToastComponent</string>
+        </Properties>
+      </Item>
+    </Item>
+  </Item>
+</roblox>
